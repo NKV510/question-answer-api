@@ -16,44 +16,43 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const (
-	envlocal = "local"
-	envDev   = "dev"
-	envProd  = "prod"
-)
-
 func main() {
+	setupLogging()
+
+	slog.Info("Starting question-answer API server")
+
 	cfg, err := config.LoadConfig()
-
-	log := setupLoger(cfg.ENV)
-
-	log.Info("Start server", slog.String("env", cfg.ENV))
-
 	if err != nil {
-		log.Error("Can not config connection")
+		slog.Error("Failed to load config", "error", err)
 		os.Exit(1)
 	}
 
-	// Инициализация репозитория
+	slog.Info("Config loaded successfully",
+		"db_host", cfg.DBHost,
+		"db_port", cfg.DBPort,
+		"db_name", cfg.DBName,
+	)
+
+	if err := database.ConnectDataBase(cfg); err != nil {
+		slog.Error("Failed to connect to database", "error", err)
+		os.Exit(1)
+	}
+
 	repo := repository.NewRepository(database.GetDB())
 
-	// Инициализация обработчиков
 	handler := handlers.NewHandler(repo)
 
-	// Настройка Gin
 	if os.Getenv("GIN_MODE") == "release" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
 	router := gin.New()
 
-	// Middleware
 	router.Use(gin.Recovery())
+	router.Use(loggingMiddleware())
 
-	// Routes
 	setupRoutes(router, handler)
 
-	// Настройка сервера
 	srv := &http.Server{
 		Addr:         ":" + cfg.ServerPort,
 		Handler:      router,
@@ -62,7 +61,6 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Запуск сервера в горутине
 	go func() {
 		slog.Info("Server starting", "port", cfg.ServerPort)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -71,7 +69,6 @@ func main() {
 		}
 	}()
 
-	// Ожидание сигналов для graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -88,38 +85,62 @@ func main() {
 	slog.Info("Server exited")
 }
 
-func setupLoger(ENV string) *slog.Logger {
-	var log *slog.Logger
-	switch ENV {
-	case envlocal:
-		log = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	case envDev:
-		log = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	case envProd:
-		log = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+func setupLogging() {
+	if os.Getenv("ENV") == "production" {
+		handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		})
+		slog.SetDefault(slog.New(handler))
+	} else {
+		handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})
+		slog.SetDefault(slog.New(handler))
 	}
-	return log
+}
+
+func loggingMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+
+		c.Next()
+
+		duration := time.Since(start)
+
+		logger := slog.With(
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"status", c.Writer.Status(),
+			"duration", duration.String(),
+			"client_ip", c.ClientIP(),
+		)
+
+		if c.Writer.Status() >= 500 {
+			logger.Error("HTTP request error")
+		} else if c.Writer.Status() >= 400 {
+			logger.Warn("HTTP request client error")
+		} else {
+			logger.Info("HTTP request")
+		}
+	}
 }
 
 func setupRoutes(router *gin.Engine, handler *handlers.Handler) {
-	// Questions endpoints
 	questions := router.Group("/questions")
 	{
-		//questions.GET("/", handler.GetQuestions)
-		questions.POST("/", handler.PostQuestionHandler)
-		//questions.GET("/:id", handler.GetQuestion)
-		//questions.DELETE("/:id", handler.DeleteQuestion)
+		questions.GET("/", handler.GetQuestions)
+		questions.POST("/", handler.CreateQuestion)
+		questions.GET("/:id", handler.GetQuestion)
+		questions.DELETE("/:id", handler.DeleteQuestion)
 	}
 
-	// Answers endpoints
-	// answers := router.Group("/answers")
-	// {
-	// 	answers.GET("/:id", handler.GetAnswer)
-	// 	answers.DELETE("/:id", handler.DeleteAnswer)
-	// }
+	answers := router.Group("/answers")
+	{
+		answers.GET("/:id", handler.GetAnswer)
+		answers.DELETE("/:id", handler.DeleteAnswer)
+	}
 
-	// // Ответы к конкретному вопросу
-	// router.POST("/questions/:id/answers", handler.CreateAnswer)
+	router.POST("/questions/:id/answers", handler.CreateAnswer)
 
 	// Health check
 	router.GET("/health", func(c *gin.Context) {
@@ -130,7 +151,6 @@ func setupRoutes(router *gin.Engine, handler *handlers.Handler) {
 		})
 	})
 
-	// Обработка несуществующих маршрутов
 	router.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error": "Route not found",
