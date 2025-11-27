@@ -142,14 +142,13 @@ func setupRoutes(router *gin.Engine, handler *handlers.Handler) {
 
 	router.POST("/questions/:id/answers", handler.CreateAnswer)
 
-	// Health check
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":    "ok",
-			"timestamp": time.Now().Unix(),
-			"service":   "question-answer-api",
-		})
-	})
+	// router.GET("/health", func(c *gin.Context) {
+	// 	c.JSON(http.StatusOK, gin.H{
+	// 		"status":    "ok",
+	// 		"timestamp": time.Now().Unix(),
+	// 		"service":   "question-answer-api",
+	// 	})
+	// })
 
 	router.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{
